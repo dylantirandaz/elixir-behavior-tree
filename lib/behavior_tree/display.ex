@@ -95,5 +95,7 @@ defmodule BehaviorTree.Display do
 
   defp node_label(%Node{type: :repeat_n} = node), do: "repeat_n(#{node.repeat_total})"
   defp node_label(%Node{type: :parallel} = node), do: "parallel(#{node.success_threshold})"
+  defp node_label(%Node{type: :guard}), do: "guard"
+  defp node_label(%Node{type: :weighted_select}), do: "weighted_select"
   defp node_label(%Node{type: type}), do: Atom.to_string(type)
 end

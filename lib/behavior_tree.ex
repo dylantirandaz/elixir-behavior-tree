@@ -103,9 +103,9 @@ defmodule BehaviorTree do
   alias ExZipper.Zipper
   alias BehaviorTree.Node
 
-  defstruct [:zipper]
+  defstruct [:zipper, blackboard: %{}]
 
-  @opaque t :: %__MODULE__{zipper: Zipper.t()}
+  @opaque t :: %__MODULE__{zipper: Zipper.t(), blackboard: map()}
 
   @doc """
   Start your behavior tree.  
@@ -127,8 +127,8 @@ defmodule BehaviorTree do
       :a
 
   """
-  @spec start(any) :: __MODULE__.t()
-  def start(node) do
+  @spec start(any, map()) :: __MODULE__.t()
+  def start(node, blackboard \\ %{}) do
     Zipper.zipper(
       fn node -> Node.Protocol.get_children(node) != [] end,
       fn node -> Node.Protocol.get_children(node) end,
@@ -136,7 +136,7 @@ defmodule BehaviorTree do
       node
     )
     |> descend_to_leaf
-    |> (fn zipper -> %__MODULE__{zipper: zipper} end).()
+    |> (fn zipper -> %__MODULE__{zipper: zipper, blackboard: blackboard} end).()
   end
 
   @doc """
@@ -149,7 +149,7 @@ defmodule BehaviorTree do
     if Zipper.root(zipper) == zipper do
       zipper
       |> descend_to_leaf
-      |> (fn zipper -> %__MODULE__{zipper: zipper} end).()
+      |> (fn zipper -> %__MODULE__{bt | zipper: zipper} end).()
     else
       parent = Zipper.up(zipper)
 
@@ -163,7 +163,7 @@ defmodule BehaviorTree do
         %Zipper{} = new_zipper ->
           new_zipper
           |> descend_to_leaf
-          |> (fn zipper -> %__MODULE__{zipper: zipper} end).()
+          |> (fn zipper -> %__MODULE__{bt | zipper: zipper} end).()
       end
     end
   end
@@ -178,7 +178,7 @@ defmodule BehaviorTree do
     if Zipper.root(zipper) == zipper do
       zipper
       |> descend_to_leaf
-      |> (fn zipper -> %__MODULE__{zipper: zipper} end).()
+      |> (fn zipper -> %__MODULE__{bt | zipper: zipper} end).()
     else
       parent = Zipper.up(zipper)
 
@@ -192,7 +192,7 @@ defmodule BehaviorTree do
         %Zipper{} = new_zipper ->
           new_zipper
           |> descend_to_leaf
-          |> (fn zipper -> %__MODULE__{zipper: zipper} end).()
+          |> (fn zipper -> %__MODULE__{bt | zipper: zipper} end).()
       end
     end
   end
@@ -221,10 +221,55 @@ defmodule BehaviorTree do
       :x
   """
   @spec update(__MODULE__.t(), (any() -> any())) :: __MODULE__.t()
-  def update(%__MODULE__{zipper: zipper}, fun) when is_function(fun, 1) do
+  def update(%__MODULE__{zipper: zipper, blackboard: bb}, fun) when is_function(fun, 1) do
     root = Zipper.node(Zipper.root(zipper))
-    start(fun.(root))
+    start(fun.(root), bb)
   end
+
+  @doc """
+  Get a value from the blackboard.
+
+  ## Example
+
+      iex> tree = Node.sequence([:a]) |> BehaviorTree.start(%{hp: 100})
+      iex> BehaviorTree.get_bb(tree, :hp)
+      100
+
+      iex> tree = Node.sequence([:a]) |> BehaviorTree.start()
+      iex> BehaviorTree.get_bb(tree, :hp, 0)
+      0
+  """
+  @spec get_bb(__MODULE__.t(), any(), any()) :: any()
+  def get_bb(%__MODULE__{blackboard: bb}, key, default \\ nil) do
+    Map.get(bb, key, default)
+  end
+
+  @doc """
+  Set a value on the blackboard.
+
+  ## Example
+
+      iex> tree = Node.sequence([:a]) |> BehaviorTree.start()
+      iex> tree = BehaviorTree.put_bb(tree, :target, {3, 5})
+      iex> BehaviorTree.get_bb(tree, :target)
+      {3, 5}
+  """
+  @spec put_bb(__MODULE__.t(), any(), any()) :: __MODULE__.t()
+  def put_bb(%__MODULE__{} = bt, key, value) do
+    %__MODULE__{bt | blackboard: Map.put(bt.blackboard, key, value)}
+  end
+
+  @doc """
+  Get the entire blackboard map.
+
+  ## Example
+
+      iex> tree = Node.sequence([:a]) |> BehaviorTree.start(%{hp: 100, target: :enemy})
+      iex> BehaviorTree.blackboard(tree)
+      %{hp: 100, target: :enemy}
+  """
+  @spec blackboard(__MODULE__.t()) :: map()
+  def blackboard(%__MODULE__{blackboard: bb}), do: bb
 
   @doc """
   Returns a readable string of the tree structure.

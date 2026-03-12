@@ -48,6 +48,8 @@ defmodule BehaviorTree.Serializer do
       :repeat_n -> Map.put(base, "n", node.repeat_total)
       :random_weighted -> Map.put(base, "weights", node.weights)
       :parallel -> Map.put(base, "threshold", node.success_threshold)
+      :weighted_select -> Map.put(base, "weights", node.weights)
+      :guard -> raise ArgumentError, "guard nodes contain functions and cannot be serialized"
       _ -> base
     end
   end
@@ -89,6 +91,7 @@ defmodule BehaviorTree.Serializer do
       :always_succeed -> Node.always_succeed(hd(children))
       :always_fail -> Node.always_fail(hd(children))
       :negate -> Node.negate(hd(children))
+      :weighted_select -> Node.weighted_select(Enum.zip(children, map["weights"]))
     end
   end
 

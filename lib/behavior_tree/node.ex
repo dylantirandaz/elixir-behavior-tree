@@ -81,7 +81,8 @@ defmodule BehaviorTree.Node do
     repeat_total: 1,
     weights: [],
     success_count: 0,
-    success_threshold: 1
+    success_threshold: 1,
+    shuffled_indices: []
   ]
 
   @opaque t :: %__MODULE__{
@@ -96,13 +97,16 @@ defmodule BehaviorTree.Node do
               | :always_succeed
               | :always_fail
               | :negate
-              | :parallel,
+              | :parallel
+              | :guard
+              | :weighted_select,
             children: nonempty_list(any()),
             repeat_count: pos_integer(),
             repeat_total: pos_integer(),
             weights: list(pos_integer()),
             success_count: non_neg_integer(),
-            success_threshold: pos_integer()
+            success_threshold: pos_integer(),
+            shuffled_indices: list(non_neg_integer())
           }
 
   defimpl BehaviorTree.Node.Protocol do
@@ -151,6 +155,17 @@ defmodule BehaviorTree.Node do
       |> Zipper.down()
     end
 
+    def first_child(%BehaviorTree.Node{type: :weighted_select, weights: weights}, zipper) do
+      order = weighted_shuffle(weights)
+      first_idx = hd(order)
+      n_times = [nil] |> Stream.cycle() |> Enum.take(first_idx)
+
+      zipper
+      |> Zipper.edit(&%BehaviorTree.Node{&1 | shuffled_indices: order})
+      |> Zipper.down()
+      |> (fn z -> Enum.reduce(n_times, z, fn _, acc -> Zipper.right(acc) end) end).()
+    end
+
     def first_child(_data, zipper), do: Zipper.down(zipper)
 
     def on_succeed(%BehaviorTree.Node{type: :sequence}, zipper) do
@@ -189,6 +204,15 @@ defmodule BehaviorTree.Node do
     def on_succeed(%BehaviorTree.Node{type: :always_fail}, _zipper), do: :fail
 
     def on_succeed(%BehaviorTree.Node{type: :negate}, _zipper), do: :fail
+
+    def on_succeed(%BehaviorTree.Node{type: :guard}, zipper) do
+      case Zipper.lefts(zipper) do
+        [] -> Zipper.right(zipper)
+        _ -> :succeed
+      end
+    end
+
+    def on_succeed(%BehaviorTree.Node{type: :weighted_select}, _zipper), do: :succeed
 
     def on_succeed(
           %BehaviorTree.Node{type: :parallel, success_count: count, success_threshold: threshold},
@@ -249,6 +273,27 @@ defmodule BehaviorTree.Node do
 
     def on_fail(%BehaviorTree.Node{type: :negate}, _zipper), do: :succeed
 
+    def on_fail(%BehaviorTree.Node{type: :guard}, _zipper), do: :fail
+
+    def on_fail(
+          %BehaviorTree.Node{type: :weighted_select, shuffled_indices: [_current | rest]},
+          zipper
+        ) do
+      case rest do
+        [] ->
+          :fail
+
+        [next_idx | _] ->
+          n_times = [nil] |> Stream.cycle() |> Enum.take(next_idx)
+
+          zipper
+          |> Zipper.up()
+          |> Zipper.edit(&%BehaviorTree.Node{&1 | shuffled_indices: rest})
+          |> Zipper.down()
+          |> (fn z -> Enum.reduce(n_times, z, fn _, acc -> Zipper.right(acc) end) end).()
+      end
+    end
+
     def on_fail(
           %BehaviorTree.Node{type: :parallel, success_count: count, success_threshold: threshold},
           zipper
@@ -260,6 +305,33 @@ defmodule BehaviorTree.Node do
         next ->
           next
       end
+    end
+
+    # Produces a list of indices ordered by weighted random selection.
+    # Higher weights are more likely to appear earlier.
+    defp weighted_shuffle(weights) do
+      weights
+      |> Enum.with_index()
+      |> Enum.map(fn {w, i} -> {i, w} end)
+      |> do_shuffle([])
+    end
+
+    defp do_shuffle([], acc), do: Enum.reverse(acc)
+
+    defp do_shuffle(remaining, acc) do
+      total = remaining |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+      roll = :rand.uniform(total)
+      {picked_idx, rest} = pick_by_weight(remaining, roll)
+      do_shuffle(rest, [picked_idx | acc])
+    end
+
+    defp pick_by_weight([{idx, weight} | rest], roll) when roll <= weight do
+      {idx, rest}
+    end
+
+    defp pick_by_weight([head | rest], roll) do
+      {picked, remaining} = pick_by_weight(rest, roll - elem(head, 1))
+      {picked, [head | remaining]}
     end
   end
 
@@ -576,5 +648,63 @@ defmodule BehaviorTree.Node do
   def parallel(children, threshold)
       when is_list(children) and length(children) != 0 and threshold > 0 do
     %__MODULE__{type: :parallel, children: children, success_threshold: threshold}
+  end
+
+  @doc """
+  Create a "guard" style decorator node.
+
+  Takes a condition and a child. The condition is presented as the first leaf value.
+  The handler should evaluate it and call `succeed` if the condition passes, `fail` otherwise.
+  If the condition passes, the tree moves to the actual child. If either the condition
+  or the child fails, the guard fails.
+
+  Works well with the blackboard — pass a function as the condition and have the handler
+  call it with the blackboard contents.
+
+  ## Example
+
+      iex> tree = Node.sequence([Node.guard(:has_ammo?, :shoot), :reload])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.value()
+      :has_ammo?
+
+      iex> tree = Node.sequence([Node.guard(:has_ammo?, :shoot), :reload])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.succeed() |> BehaviorTree.value()
+      :shoot
+
+      iex> tree = Node.sequence([Node.guard(:has_ammo?, :shoot), :reload])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.fail() |> BehaviorTree.value()
+      :has_ammo?
+  """
+  @spec guard(any(), any()) :: __MODULE__.t()
+  def guard(condition, child) do
+    %__MODULE__{type: :guard, children: [condition, child]}
+  end
+
+  @doc """
+  Create a "weighted_select" style node.
+
+  Like `select`, but tries children in a weighted random order instead of left-to-right.
+  Higher weights make a child more likely to be tried first. On fail, moves to the next
+  child in the shuffled order. Succeeds as soon as any child succeeds, fails if all fail.
+
+  Takes a list of `{child, weight}` tuples.
+
+  ## Example
+
+      iex> tree = Node.sequence([
+      ...>   Node.weighted_select([{:a, 1}, {:b, 1}]),
+      ...>   :done
+      ...> ])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.succeed() |> BehaviorTree.value()
+      :done
+  """
+  @spec weighted_select(nonempty_list({any(), pos_integer()})) :: __MODULE__.t()
+  def weighted_select(children_with_weights)
+      when is_list(children_with_weights) and length(children_with_weights) != 0 do
+    %__MODULE__{
+      type: :weighted_select,
+      children: Enum.map(children_with_weights, &elem(&1, 0)),
+      weights: Enum.map(children_with_weights, &elem(&1, 1))
+    }
   end
 end

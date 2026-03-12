@@ -101,6 +101,18 @@ defmodule BehaviorTree.DSL do
     quote do: BehaviorTree.Node.negate(unquote(child))
   end
 
+  @doc "Builds a guard decorator. First child is the condition, second is the block child."
+  defmacro guard(condition, do: block) do
+    child = extract_single_child(block)
+    quote do: BehaviorTree.Node.guard(unquote(condition), unquote(child))
+  end
+
+  @doc "Builds a weighted_select node. Children should be `{value, weight}` tuples."
+  defmacro weighted_select(do: block) do
+    children = extract_children(block)
+    quote do: BehaviorTree.Node.weighted_select(unquote(children))
+  end
+
   defp extract_children({:__block__, _, children}), do: children
   defp extract_children(single), do: [single]
 

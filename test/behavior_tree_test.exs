@@ -272,6 +272,152 @@ defmodule BehaviorTreeTest do
     end
   end
 
+  describe "blackboard" do
+    test "starts empty by default" do
+      tree = Node.sequence([:a]) |> BT.start()
+      assert BT.blackboard(tree) == %{}
+    end
+
+    test "can be initialized with start" do
+      tree = Node.sequence([:a]) |> BT.start(%{hp: 100})
+      assert BT.get_bb(tree, :hp) == 100
+    end
+
+    test "get_bb returns default when key missing" do
+      tree = Node.sequence([:a]) |> BT.start()
+      assert BT.get_bb(tree, :missing, :default) == :default
+    end
+
+    test "put_bb sets values" do
+      tree = Node.sequence([:a]) |> BT.start()
+      tree = BT.put_bb(tree, :target, {3, 5})
+      assert BT.get_bb(tree, :target) == {3, 5}
+    end
+
+    test "persists through succeed and fail" do
+      tree = Node.sequence([:a, :b]) |> BT.start(%{score: 0})
+      tree = BT.put_bb(tree, :score, 10)
+
+      tree = BT.succeed(tree)
+      assert BT.get_bb(tree, :score) == 10
+
+      tree = BT.fail(tree)
+      assert BT.get_bb(tree, :score) == 10
+    end
+
+    test "persists through update" do
+      tree = Node.sequence([:a]) |> BT.start(%{hp: 50})
+      tree = BT.update(tree, fn _root -> Node.sequence([:x, :y]) end)
+      assert BT.get_bb(tree, :hp) == 50
+    end
+  end
+
+  describe "guard" do
+    test "presents condition as first value" do
+      tree = Node.guard(:check, :action) |> BT.start()
+      assert BT.value(tree) == :check
+    end
+
+    test "moves to child when condition succeeds" do
+      tree = Node.guard(:check, :action) |> BT.start()
+      tree = BT.succeed(tree)
+      assert BT.value(tree) == :action
+    end
+
+    test "fails when condition fails" do
+      tree = Node.select([Node.guard(:check, :action), :fallback])
+      bt = BT.start(tree)
+      assert BT.value(bt) == :check
+
+      bt = BT.fail(bt)
+      assert BT.value(bt) == :fallback
+    end
+
+    test "fails when child fails" do
+      tree = Node.select([Node.guard(:check, :action), :fallback])
+      bt = BT.start(tree)
+
+      # condition passes
+      bt = BT.succeed(bt)
+      assert BT.value(bt) == :action
+
+      # child fails -> guard fails -> select moves on
+      bt = BT.fail(bt)
+      assert BT.value(bt) == :fallback
+    end
+
+    test "succeeds when child succeeds" do
+      tree = Node.sequence([Node.guard(:check, :action), :next])
+      bt = BT.start(tree)
+
+      bt = bt |> BT.succeed() |> BT.succeed()
+      assert BT.value(bt) == :next
+    end
+
+    test "works with function conditions and blackboard" do
+      check_fn = fn bb -> bb[:hp] > 0 end
+      tree = Node.guard(check_fn, :fight) |> BT.start(%{hp: 50})
+
+      # handler evaluates the condition
+      condition = BT.value(tree)
+      assert condition.(BT.blackboard(tree)) == true
+    end
+  end
+
+  describe "weighted_select" do
+    test "picks a child and succeeds" do
+      tree = Node.sequence([
+        Node.weighted_select([{:a, 1}, {:b, 1}]),
+        :done
+      ])
+
+      bt = BT.start(tree)
+      value = BT.value(bt)
+      assert value in [:a, :b]
+
+      bt = BT.succeed(bt)
+      assert BT.value(bt) == :done
+    end
+
+    test "tries next child on fail" do
+      tree = Node.weighted_select([{:a, 1}, {:b, 1}])
+      bt = BT.start(tree)
+      first = BT.value(bt)
+
+      bt = BT.fail(bt)
+      second = BT.value(bt)
+
+      # should get the other child
+      assert first != second
+      assert second in [:a, :b]
+    end
+
+    test "fails when all children fail" do
+      tree = Node.select([
+        Node.weighted_select([{:a, 1}, {:b, 1}]),
+        :fallback
+      ])
+
+      bt = BT.start(tree)
+      bt = bt |> BT.fail() |> BT.fail()
+      assert BT.value(bt) == :fallback
+    end
+
+    test "higher weights are picked more often" do
+      results =
+        Enum.reduce(1..200, {0, 0}, fn _, {a_first, b_first} ->
+          bt = Node.weighted_select([{:a, 10}, {:b, 1}]) |> BT.start()
+          case BT.value(bt) do
+            :a -> {a_first + 1, b_first}
+            :b -> {a_first, b_first + 1}
+          end
+        end)
+
+      {a_count, b_count} = results
+      assert a_count > b_count
+    end
+  end
+
   test "random_weighted" do
     # This attempts to test results form :rand.uniform/2, which means it will
     # either be flaky or an approximation, but still useful
