@@ -5,6 +5,8 @@ defmodule BehaviorTreeTest do
 
   doctest BehaviorTree
   doctest Node
+  doctest BehaviorTree.Display
+  doctest BehaviorTree.Serializer
 
   setup do
     tree =
@@ -83,6 +85,191 @@ defmodule BehaviorTreeTest do
     |> BehaviorTree.succeed()
     |> BehaviorTree.value()
     == :a
+  end
+
+  describe "parallel" do
+    test "visits all children and succeeds when all succeed" do
+      tree = Node.parallel([:a, :b, :c])
+      bt = BT.start(tree)
+      assert BT.value(bt) == :a
+
+      bt = BT.succeed(bt)
+      assert BT.value(bt) == :b
+
+      bt = BT.succeed(bt)
+      assert BT.value(bt) == :c
+
+      # all 3 succeeded, parallel succeeds -> tree restarts
+      bt = BT.succeed(bt)
+      assert BT.value(bt) == :a
+    end
+
+    test "fails when not enough children succeed (default threshold = all)" do
+      tree = Node.sequence([Node.parallel([:a, :b, :c]), :done])
+      bt = BT.start(tree)
+
+      bt = bt |> BT.succeed() |> BT.fail() |> BT.succeed()
+      # 2 out of 3 succeeded, threshold is 3 -> parallel fails -> sequence fails -> restart
+      assert BT.value(bt) == :a
+    end
+
+    test "succeeds with custom threshold" do
+      tree = Node.sequence([Node.parallel([:a, :b, :c], 2), :done])
+      bt = BT.start(tree)
+
+      # succeed, fail, succeed -> 2 successes >= threshold of 2
+      bt = bt |> BT.succeed() |> BT.fail() |> BT.succeed()
+      assert BT.value(bt) == :done
+    end
+
+    test "fails with custom threshold not met" do
+      tree = Node.sequence([Node.parallel([:a, :b, :c], 2), :done])
+      bt = BT.start(tree)
+
+      # succeed, fail, fail -> 1 success < threshold of 2
+      bt = bt |> BT.succeed() |> BT.fail() |> BT.fail()
+      assert BT.value(bt) == :a
+    end
+
+    test "works nested inside other nodes" do
+      tree =
+        Node.select([
+          Node.parallel([:a, :b], 2),
+          :fallback
+        ])
+
+      bt = BT.start(tree)
+      assert BT.value(bt) == :a
+
+      # both fail -> parallel fails -> select moves to fallback
+      bt = bt |> BT.fail() |> BT.fail()
+      assert BT.value(bt) == :fallback
+    end
+  end
+
+  describe "display" do
+    test "shows tree structure for started tree" do
+      tree = Node.sequence([:a, :b])
+      bt = BT.start(tree)
+      result = BT.display(bt)
+
+      assert result =~ "sequence"
+      assert result =~ ":a"
+      assert result =~ ":b"
+      assert result =~ "◀"
+    end
+
+    test "shows tree structure for raw node" do
+      tree = Node.sequence([Node.select([:a, :b]), :c])
+      result = BT.display(tree)
+
+      assert result =~ "sequence"
+      assert result =~ "select"
+      assert result =~ ":a"
+      assert result =~ ":c"
+      refute result =~ "◀"
+    end
+  end
+
+  describe "update" do
+    test "swaps the tree definition and restarts" do
+      tree = Node.sequence([:a, :b]) |> BT.start()
+      assert BT.value(tree) == :a
+
+      tree = BT.update(tree, fn _root -> Node.sequence([:x, :y]) end)
+      assert BT.value(tree) == :x
+    end
+
+    test "can modify the existing tree" do
+      tree = Node.sequence([:a, :b]) |> BT.start()
+      tree = BT.update(tree, fn %{children: children} ->
+        Node.sequence(children ++ [:c])
+      end)
+      assert BT.value(tree) == :a
+
+      tree = tree |> BT.succeed() |> BT.succeed()
+      assert BT.value(tree) == :c
+    end
+  end
+
+  describe "DSL" do
+    import BehaviorTree.DSL
+
+    test "builds trees with block syntax" do
+      tree = sequence do
+        :a
+        :b
+        :c
+      end
+
+      assert tree == Node.sequence([:a, :b, :c])
+    end
+
+    test "supports nesting" do
+      tree = sequence do
+        select do
+          :a
+          :b
+        end
+        :c
+      end
+
+      assert tree == Node.sequence([Node.select([:a, :b]), :c])
+    end
+
+    test "supports decorators" do
+      tree = repeat_n 3 do
+        :a
+      end
+
+      assert tree == Node.repeat_n(3, :a)
+    end
+
+    test "supports parallel" do
+      tree = parallel 2 do
+        :a
+        :b
+        :c
+      end
+
+      assert tree == Node.parallel([:a, :b, :c], 2)
+    end
+  end
+
+  describe "serializer" do
+    alias BehaviorTree.Serializer
+
+    test "round-trips a simple tree" do
+      tree = Node.sequence([:a, :b, :c])
+      assert tree == tree |> Serializer.to_map() |> Serializer.from_map()
+    end
+
+    test "round-trips nested trees" do
+      tree = Node.sequence([
+        Node.select([:a, :b]),
+        Node.always_succeed(:c),
+        :d
+      ])
+      assert tree == tree |> Serializer.to_map() |> Serializer.from_map()
+    end
+
+    test "round-trips repeat_n" do
+      tree = Node.repeat_n(5, :a)
+      assert tree == tree |> Serializer.to_map() |> Serializer.from_map()
+    end
+
+    test "round-trips parallel with threshold" do
+      tree = Node.parallel([:a, :b, :c], 2)
+      assert tree == tree |> Serializer.to_map() |> Serializer.from_map()
+    end
+
+    test "produces JSON-friendly maps" do
+      map = Serializer.to_map(Node.sequence([:a, :b]))
+      assert map == %{
+        "type" => "sequence",
+        "children" => [%{"leaf" => "a"}, %{"leaf" => "b"}]
+      }
+    end
   end
 
   test "random_weighted" do

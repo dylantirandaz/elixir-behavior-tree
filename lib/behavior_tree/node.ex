@@ -74,7 +74,15 @@ defmodule BehaviorTree.Node do
   """
   alias ExZipper.Zipper
 
-  defstruct [:type, :children, repeat_count: 1, repeat_total: 1, weights: []]
+  defstruct [
+    :type,
+    :children,
+    repeat_count: 1,
+    repeat_total: 1,
+    weights: [],
+    success_count: 0,
+    success_threshold: 1
+  ]
 
   @opaque t :: %__MODULE__{
             type:
@@ -87,11 +95,14 @@ defmodule BehaviorTree.Node do
               | :random_weighted
               | :always_succeed
               | :always_fail
-              | :negate,
+              | :negate
+              | :parallel,
             children: nonempty_list(any()),
             repeat_count: pos_integer(),
             repeat_total: pos_integer(),
-            weights: list(pos_integer())
+            weights: list(pos_integer()),
+            success_count: non_neg_integer(),
+            success_threshold: pos_integer()
           }
 
   defimpl BehaviorTree.Node.Protocol do
@@ -134,6 +145,12 @@ defmodule BehaviorTree.Node do
       |> Zipper.down()
     end
 
+    def first_child(%BehaviorTree.Node{type: :parallel}, zipper) do
+      zipper
+      |> Zipper.edit(&%BehaviorTree.Node{&1 | success_count: 0})
+      |> Zipper.down()
+    end
+
     def first_child(_data, zipper), do: Zipper.down(zipper)
 
     def on_succeed(%BehaviorTree.Node{type: :sequence}, zipper) do
@@ -173,6 +190,28 @@ defmodule BehaviorTree.Node do
 
     def on_succeed(%BehaviorTree.Node{type: :negate}, _zipper), do: :fail
 
+    def on_succeed(
+          %BehaviorTree.Node{type: :parallel, success_count: count, success_threshold: threshold},
+          zipper
+        ) do
+      new_count = count + 1
+
+      case Zipper.right(zipper) do
+        {:error, :right_from_rightmost} ->
+          if new_count >= threshold, do: :succeed, else: :fail
+
+        _next ->
+          next_index = zipper |> Zipper.lefts() |> length() |> Kernel.+(1)
+          n_times = [nil] |> Stream.cycle() |> Enum.take(next_index)
+
+          zipper
+          |> Zipper.up()
+          |> Zipper.edit(&%BehaviorTree.Node{&1 | success_count: new_count})
+          |> Zipper.down()
+          |> (fn z -> Enum.reduce(n_times, z, fn _, acc -> Zipper.right(acc) end) end).()
+      end
+    end
+
     def on_fail(%BehaviorTree.Node{type: :sequence}, _zipper), do: :fail
 
     def on_fail(%BehaviorTree.Node{type: :select}, zipper) do
@@ -209,6 +248,19 @@ defmodule BehaviorTree.Node do
     def on_fail(%BehaviorTree.Node{type: :always_fail}, _zipper), do: :fail
 
     def on_fail(%BehaviorTree.Node{type: :negate}, _zipper), do: :succeed
+
+    def on_fail(
+          %BehaviorTree.Node{type: :parallel, success_count: count, success_threshold: threshold},
+          zipper
+        ) do
+      case Zipper.right(zipper) do
+        {:error, :right_from_rightmost} ->
+          if count >= threshold, do: :succeed, else: :fail
+
+        next ->
+          next
+      end
+    end
   end
 
   @doc """
@@ -486,5 +538,43 @@ defmodule BehaviorTree.Node do
   @spec negate(any()) :: __MODULE__.t()
   def negate(child) do
     %__MODULE__{type: :negate, children: [child]}
+  end
+
+  @doc """
+  Create a "parallel" style node with the supplied children.
+
+  Runs through all children left to right regardless of individual outcomes.
+  After all children have been visited, succeeds if at least `threshold` children
+  succeeded, otherwise fails.
+
+  With no threshold, all children must succeed (threshold = length of children).
+
+  ## Example
+
+      iex> tree = Node.parallel([:a, :b, :c])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.succeed() |> BehaviorTree.value()
+      :b
+
+      iex> tree = Node.parallel([:a, :b, :c])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.succeed() |> BehaviorTree.succeed() |> BehaviorTree.succeed() |> BehaviorTree.value()
+      :a
+
+      iex> tree = Node.sequence([Node.parallel([:a, :b], 1), :done])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.succeed() |> BehaviorTree.fail() |> BehaviorTree.value()
+      :done
+
+      iex> tree = Node.sequence([Node.parallel([:a, :b], 2), :done])
+      iex> tree |> BehaviorTree.start() |> BehaviorTree.succeed() |> BehaviorTree.fail() |> BehaviorTree.value()
+      :a
+  """
+  @spec parallel(nonempty_list(any())) :: __MODULE__.t()
+  def parallel(children) when is_list(children) and length(children) != 0 do
+    %__MODULE__{type: :parallel, children: children, success_threshold: length(children)}
+  end
+
+  @spec parallel(nonempty_list(any()), pos_integer()) :: __MODULE__.t()
+  def parallel(children, threshold)
+      when is_list(children) and length(children) != 0 and threshold > 0 do
+    %__MODULE__{type: :parallel, children: children, success_threshold: threshold}
   end
 end

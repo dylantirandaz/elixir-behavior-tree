@@ -207,6 +207,41 @@ defmodule BehaviorTree do
     Zipper.node(bt.zipper)
   end
 
+  @doc """
+  Replace the tree definition and restart.
+
+  Takes a function that receives the current root node and returns a new one.
+  The tree is restarted with the new definition.
+
+  ## Example
+
+      iex> tree = Node.sequence([:a, :b]) |> BehaviorTree.start()
+      iex> tree = BehaviorTree.update(tree, fn _root -> Node.sequence([:x, :y]) end)
+      iex> BehaviorTree.value(tree)
+      :x
+  """
+  @spec update(__MODULE__.t(), (any() -> any())) :: __MODULE__.t()
+  def update(%__MODULE__{zipper: zipper}, fun) when is_function(fun, 1) do
+    root = Zipper.node(Zipper.root(zipper))
+    start(fun.(root))
+  end
+
+  @doc """
+  Returns a readable string of the tree structure.
+
+  For started trees, the current leaf is marked with ◀.
+  Also works with raw node definitions.
+
+  ## Example
+
+      iex> Node.sequence([:a, :b]) |> BehaviorTree.start() |> BehaviorTree.display()
+      "sequence\\n├── :a  ◀\\n└── :b\\n"
+  """
+  @spec display(__MODULE__.t() | any()) :: String.t()
+  def display(bt_or_node) do
+    BehaviorTree.Display.format(bt_or_node)
+  end
+
   @spec descend_to_leaf(Zipper.t()) :: Zipper.t()
   defp descend_to_leaf(zipper) do
     case Node.Protocol.first_child(Zipper.node(zipper), zipper) do
